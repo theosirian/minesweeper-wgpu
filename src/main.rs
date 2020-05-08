@@ -4,6 +4,11 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
+enum Pipeline {
+    Simple,
+    Color,
+}
+
 struct State {
     surface: wgpu::Surface,
     adapter: wgpu::Adapter,
@@ -17,10 +22,71 @@ struct State {
     val: f64,
     clear_color: wgpu::Color,
 
+    which_pipeline: self::Pipeline,
+    simple_pipeline: wgpu::RenderPipeline,
+    color_pipeline: wgpu::RenderPipeline,
+
     size: winit::dpi::PhysicalSize<u32>,
 }
 
 impl State {
+    fn create_pipeline(
+        vs_src: &str,
+        fs_src: &str,
+        device: &wgpu::Device,
+        sc_desc: &wgpu::SwapChainDescriptor,
+    ) -> wgpu::RenderPipeline {
+        let vs_spirv = glsl_to_spirv::compile(vs_src, glsl_to_spirv::ShaderType::Vertex).unwrap();
+        let fs_spirv = glsl_to_spirv::compile(fs_src, glsl_to_spirv::ShaderType::Fragment).unwrap();
+
+        let vs_data = wgpu::read_spirv(vs_spirv).unwrap();
+        let fs_data = wgpu::read_spirv(fs_spirv).unwrap();
+
+        let vs_module = device.create_shader_module(&vs_data);
+        let fs_module = device.create_shader_module(&fs_data);
+
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                bind_group_layouts: &[],
+            });
+
+        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            layout: &render_pipeline_layout,
+            vertex_stage: wgpu::ProgrammableStageDescriptor {
+                module: &vs_module,
+                entry_point: "main",
+            },
+            fragment_stage: Some(wgpu::ProgrammableStageDescriptor {
+                module: &fs_module,
+                entry_point: "main",
+            }),
+            rasterization_state: Some(wgpu::RasterizationStateDescriptor {
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: wgpu::CullMode::Back,
+                depth_bias: 0,
+                depth_bias_slope_scale: 0.0,
+                depth_bias_clamp: 0.0,
+            }),
+            color_states: &[wgpu::ColorStateDescriptor {
+                format: sc_desc.format,
+                color_blend: wgpu::BlendDescriptor::REPLACE,
+                alpha_blend: wgpu::BlendDescriptor::REPLACE,
+                write_mask: wgpu::ColorWrite::ALL,
+            }],
+            primitive_topology: wgpu::PrimitiveTopology::TriangleList,
+            depth_stencil_state: None,
+            vertex_state: wgpu::VertexStateDescriptor {
+                index_format: wgpu::IndexFormat::Uint16,
+                vertex_buffers: &[],
+            },
+            sample_count: 1,
+            sample_mask: !0,
+            alpha_to_coverage_enabled: false,
+        });
+
+        render_pipeline
+    }
+
     async fn new(window: &Window) -> Self {
         let size = window.inner_size();
 
@@ -54,6 +120,20 @@ impl State {
         };
         let swap_chain = device.create_swap_chain(&surface, &sc_desc);
 
+        let simple_pipeline = Self::create_pipeline(
+            include_str!("simple.vert"),
+            include_str!("simple.frag"),
+            &device,
+            &sc_desc,
+        );
+
+        let color_pipeline = Self::create_pipeline(
+            include_str!("color.vert"),
+            include_str!("color.frag"),
+            &device,
+            &sc_desc,
+        );
+
         Self {
             surface,
             adapter,
@@ -62,6 +142,10 @@ impl State {
             sc_desc,
             swap_chain,
             size,
+
+            which_pipeline: self::Pipeline::Simple,
+            simple_pipeline,
+            color_pipeline,
 
             hue: 0.0,
             sat: 0.5,
@@ -85,6 +169,22 @@ impl State {
 
     fn input(&mut self, event: &WindowEvent) -> bool {
         match event {
+            WindowEvent::KeyboardInput {
+                input:
+                    KeyboardInput {
+                        state: ElementState::Released,
+                        virtual_keycode: Some(VirtualKeyCode::Space),
+                        ..
+                    },
+                ..
+            } => {
+                self.which_pipeline = match self.which_pipeline {
+                    self::Pipeline::Simple => self::Pipeline::Color,
+                    self::Pipeline::Color => self::Pipeline::Simple,
+                };
+                false
+            }
+
             WindowEvent::CursorEntered { .. } => {
                 self.clear_color = wgpu::Color {
                     r: 0.1,
@@ -136,7 +236,7 @@ impl State {
 
         let color: palette::Srgb<f64> = palette::Hsv::new(self.hue, self.sat, self.val).into();
 
-        let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
                 attachment: &frame.view,
                 resolve_target: None,
@@ -151,6 +251,13 @@ impl State {
             }],
             depth_stencil_attachment: None,
         });
+
+        match self.which_pipeline {
+            self::Pipeline::Simple => render_pass.set_pipeline(&self.simple_pipeline),
+            self::Pipeline::Color => render_pass.set_pipeline(&self.color_pipeline),
+        };
+
+        render_pass.draw(0..3, 0..1);
 
         drop(render_pass);
 
@@ -180,7 +287,7 @@ fn main() {
                         WindowEvent::KeyboardInput { input, .. } => match input {
                             KeyboardInput {
                                 state: ElementState::Pressed,
-                                virtual_keycode: Some(VirtualKeyCode::Escape),
+                                virtual_keycode: Some(VirtualKeyCode::Q),
                                 ..
                             } => *control_flow = ControlFlow::Exit,
                             _ => {}
