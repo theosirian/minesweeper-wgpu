@@ -33,29 +33,14 @@ impl Vertex {
 unsafe impl bytemuck::Pod for Vertex {}
 unsafe impl bytemuck::Zeroable for Vertex {}
 
-// #[repr(C)]
-// #[derive(Copy, Clone, Debug)]
-// struct Color {
-//     color: [f32; 3],
-// }
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct Color {
+    color: [f32; 3],
+}
 
-// impl Color {
-//     fn desc<'a>() -> wgpu::VertexBufferDescriptor<'a> {
-//         use std::mem;
-//         wgpu::VertexBufferDescriptor {
-//             stride: mem::size_of::<Color>() as wgpu::BufferAddress,
-//             step_mode: wgpu::InputStepMode::Vertex,
-//             attributes: &[wgpu::VertexAttributeDescriptor {
-//                 offset: 0,
-//                 shader_location: 0,
-//                 format: wgpu::VertexFormat::Float3,
-//             }],
-//         }
-//     }
-// }
-
-// unsafe impl bytemuck::Pod for Color {}
-// unsafe impl bytemuck::Zeroable for Color {}
+unsafe impl bytemuck::Pod for Color {}
+unsafe impl bytemuck::Zeroable for Color {}
 
 const VERTICES: &[Vertex] = &[
     Vertex {
@@ -130,7 +115,8 @@ struct State {
     star_indices: wgpu::Buffer,
     star_len: u32,
 
-    // color_buffer: wgpu::Buffer,
+    color_buffer: wgpu::Buffer,
+    color_bind_group: wgpu::BindGroup,
     toggle: self::Toggle,
 
     size: winit::dpi::PhysicalSize<u32>,
@@ -142,7 +128,7 @@ impl State {
         fs_src: &str,
         device: &wgpu::Device,
         sc_desc: &wgpu::SwapChainDescriptor,
-    ) -> wgpu::RenderPipeline {
+    ) -> (wgpu::Buffer, wgpu::BindGroup, wgpu::RenderPipeline) {
         let vs_spirv = glsl_to_spirv::compile(vs_src, glsl_to_spirv::ShaderType::Vertex).unwrap();
         let fs_spirv = glsl_to_spirv::compile(fs_src, glsl_to_spirv::ShaderType::Fragment).unwrap();
 
@@ -152,9 +138,39 @@ impl State {
         let vs_module = device.create_shader_module(&vs_data);
         let fs_module = device.create_shader_module(&fs_data);
 
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("color_bind_group_layout"),
+            bindings: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStage::VERTEX,
+                ty: wgpu::BindingType::UniformBuffer { dynamic: false },
+            }],
+        });
+
+        let color = Color {
+            color: [1.0, 1.0, 1.0],
+        };
+
+        let color_buffer = device.create_buffer_with_data(
+            bytemuck::cast_slice(&[color]),
+            wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::WRITE_ALL,
+        );
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("color_bind_group_descriptor"),
+            layout: &bind_group_layout,
+            bindings: &[wgpu::Binding {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer {
+                    buffer: &color_buffer,
+                    range: 0..std::mem::size_of_val(&color) as wgpu::BufferAddress,
+                },
+            }],
+        });
+
         let render_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                bind_group_layouts: &[],
+                bind_group_layouts: &[&bind_group_layout],
             });
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -191,7 +207,7 @@ impl State {
             alpha_to_coverage_enabled: false,
         });
 
-        render_pipeline
+        (color_buffer, bind_group, render_pipeline)
     }
 
     async fn new(window: &Window) -> Self {
@@ -227,7 +243,7 @@ impl State {
         };
         let swap_chain = device.create_swap_chain(&surface, &sc_desc);
 
-        let render_pipeline = Self::create_pipeline(
+        let (color_buffer, color_bind_group, render_pipeline) = Self::create_pipeline(
             include_str!("simple.vert"),
             include_str!("simple.frag"),
             &device,
@@ -246,13 +262,6 @@ impl State {
         let star_indices = device
             .create_buffer_with_data(bytemuck::cast_slice(STAR_INDICES), wgpu::BufferUsage::INDEX);
         let star_len = STAR_INDICES.len() as u32;
-
-        // let color_buffer = device.create_buffer_with_data(
-        //     bytemuck::cast_slice(&[Color {
-        //         color: [1.0, 1.0, 1.0],
-        //     }]),
-        //     wgpu::BufferUsage::VERTEX | wgpu::BufferUsage::WRITE_ALL,
-        // );
 
         Self {
             surface,
@@ -277,7 +286,8 @@ impl State {
             star_indices,
             star_len,
 
-            // color_buffer,
+            color_buffer,
+            color_bind_group,
             toggle: self::Toggle::A,
 
             clear_color: wgpu::Color {
@@ -365,32 +375,31 @@ impl State {
 
         let color: palette::Srgb<f64> = palette::Hsv::new(self.hue, self.sat, self.val).into();
 
-        // let data = self
-        //     .color_buffer
-        //     .map_write(0, std::mem::size_of::<Color>() as wgpu::BufferAddress);
+        let data = self
+            .color_buffer
+            .map_write(0, std::mem::size_of::<Color>() as wgpu::BufferAddress);
 
-        // self.device.poll(wgpu::Maintain::Wait);
+        self.device.poll(wgpu::Maintain::Wait);
 
-        // if let Ok(mut data) = data.await {
-        //     let color: palette::Srgb<f32> = palette::Hsv::new(
-        //         ((self.hue + 180.0) % 360.0) as f32,
-        //         self.sat as f32,
-        //         self.val as f32,
-        //     )
-        //     .into();
+        if let Ok(mut data) = data.await {
+            let color: palette::Srgb<f32> = palette::Hsv::new(
+                ((self.hue + 180.0) % 360.0) as f32,
+                self.sat as f32,
+                self.val as f32,
+            )
+            .into();
 
-        //     let new_color = Color {
-        //         // color: [color.red, color.green, color.blue],
-        //         color: [0.0, 0.0, 0.0],
-        //     };
+            let new_color = Color {
+                color: [color.red, color.green, color.blue],
+            };
 
-        //     data.as_slice()
-        //         .copy_from_slice(bytemuck::cast_slice(&[new_color]));
-        // } else {
-        //     println!("Something went wrong");
-        // }
+            data.as_slice()
+                .copy_from_slice(bytemuck::cast_slice(&[new_color]));
+        } else {
+            println!("Something went wrong");
+        }
 
-        // self.color_buffer.unmap();
+        self.color_buffer.unmap();
 
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
@@ -409,8 +418,8 @@ impl State {
         });
 
         render_pass.set_pipeline(&self.render_pipeline);
+        render_pass.set_bind_group(0, &self.color_bind_group, &[]);
         render_pass.set_vertex_buffer(0, &self.vertex_buffer, 0, 0);
-        // render_pass.set_vertex_buffer(1, &self.color_buffer, 0, 0);
 
         match self.toggle {
             self::Toggle::A => {
