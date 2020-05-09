@@ -1441,6 +1441,7 @@ name = "minesweeper-wgpu"
 version = "0.1.0"
 dependencies = [
  "assets_manager",
+ "bytemuck",
  "dyon",
  "futures 0.3.4",
  "gilrs",

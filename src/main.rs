@@ -4,10 +4,108 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
-enum Pipeline {
-    Simple,
-    Color,
+enum Toggle {
+    A,
+    B,
 }
+
+#[repr(C)]
+#[derive(Copy, Clone, Debug)]
+struct Vertex {
+    position: [f32; 3],
+}
+
+impl Vertex {
+    fn desc<'a>() -> wgpu::VertexBufferDescriptor<'a> {
+        use std::mem;
+        wgpu::VertexBufferDescriptor {
+            stride: mem::size_of::<Vertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::InputStepMode::Vertex,
+            attributes: &[wgpu::VertexAttributeDescriptor {
+                offset: 0,
+                shader_location: 0,
+                format: wgpu::VertexFormat::Float3,
+            }],
+        }
+    }
+}
+
+unsafe impl bytemuck::Pod for Vertex {}
+unsafe impl bytemuck::Zeroable for Vertex {}
+
+// #[repr(C)]
+// #[derive(Copy, Clone, Debug)]
+// struct Color {
+//     color: [f32; 3],
+// }
+
+// impl Color {
+//     fn desc<'a>() -> wgpu::VertexBufferDescriptor<'a> {
+//         use std::mem;
+//         wgpu::VertexBufferDescriptor {
+//             stride: mem::size_of::<Color>() as wgpu::BufferAddress,
+//             step_mode: wgpu::InputStepMode::Vertex,
+//             attributes: &[wgpu::VertexAttributeDescriptor {
+//                 offset: 0,
+//                 shader_location: 0,
+//                 format: wgpu::VertexFormat::Float3,
+//             }],
+//         }
+//     }
+// }
+
+// unsafe impl bytemuck::Pod for Color {}
+// unsafe impl bytemuck::Zeroable for Color {}
+
+const VERTICES: &[Vertex] = &[
+    Vertex {
+        position: [0.0, 0.5, 0.0],
+    },
+    Vertex {
+        position: [-0.76935, 1.059, 0.0],
+    },
+    Vertex {
+        position: [-0.4755, 0.1545, 0.0],
+    },
+    Vertex {
+        position: [-1.24485, -0.4045, 0.0],
+    },
+    Vertex {
+        position: [-0.29385, -0.4045, 0.0],
+    },
+    Vertex {
+        position: [0.0, -1.309, 0.0],
+    },
+    Vertex {
+        position: [0.29385, -0.4045, 0.0],
+    },
+    Vertex {
+        position: [1.24485, -0.4045, 0.0],
+    },
+    Vertex {
+        position: [0.4755, 0.1545, 0.0],
+    },
+    Vertex {
+        position: [0.76935, 1.059, 0.0],
+    },
+];
+
+const PENTAGON_INDICES: &[u16] = &[
+    0, 2, 8, //
+    2, 4, 8, //
+    4, 6, 8, //
+];
+
+const STAR_INDICES: &[u16] = &[
+    0, 2, 8, //
+    2, 4, 8, //
+    4, 6, 8, //
+    0, 1, 2, //
+    2, 3, 4, //
+    4, 5, 6, //
+    6, 7, 8, //
+    0, 8, 9, //
+];
 
 struct State {
     surface: wgpu::Surface,
@@ -22,9 +120,18 @@ struct State {
     val: f64,
     clear_color: wgpu::Color,
 
-    which_pipeline: self::Pipeline,
-    simple_pipeline: wgpu::RenderPipeline,
-    color_pipeline: wgpu::RenderPipeline,
+    render_pipeline: wgpu::RenderPipeline,
+
+    vertex_buffer: wgpu::Buffer,
+
+    pentagon_indices: wgpu::Buffer,
+    pentagon_len: u32,
+
+    star_indices: wgpu::Buffer,
+    star_len: u32,
+
+    // color_buffer: wgpu::Buffer,
+    toggle: self::Toggle,
 
     size: winit::dpi::PhysicalSize<u32>,
 }
@@ -77,7 +184,7 @@ impl State {
             depth_stencil_state: None,
             vertex_state: wgpu::VertexStateDescriptor {
                 index_format: wgpu::IndexFormat::Uint16,
-                vertex_buffers: &[],
+                vertex_buffers: &[self::Vertex::desc()],
             },
             sample_count: 1,
             sample_mask: !0,
@@ -120,19 +227,32 @@ impl State {
         };
         let swap_chain = device.create_swap_chain(&surface, &sc_desc);
 
-        let simple_pipeline = Self::create_pipeline(
+        let render_pipeline = Self::create_pipeline(
             include_str!("simple.vert"),
             include_str!("simple.frag"),
             &device,
             &sc_desc,
         );
 
-        let color_pipeline = Self::create_pipeline(
-            include_str!("color.vert"),
-            include_str!("color.frag"),
-            &device,
-            &sc_desc,
+        let vertex_buffer = device
+            .create_buffer_with_data(bytemuck::cast_slice(VERTICES), wgpu::BufferUsage::VERTEX);
+
+        let pentagon_indices = device.create_buffer_with_data(
+            bytemuck::cast_slice(PENTAGON_INDICES),
+            wgpu::BufferUsage::INDEX,
         );
+        let pentagon_len = PENTAGON_INDICES.len() as u32;
+
+        let star_indices = device
+            .create_buffer_with_data(bytemuck::cast_slice(STAR_INDICES), wgpu::BufferUsage::INDEX);
+        let star_len = STAR_INDICES.len() as u32;
+
+        // let color_buffer = device.create_buffer_with_data(
+        //     bytemuck::cast_slice(&[Color {
+        //         color: [1.0, 1.0, 1.0],
+        //     }]),
+        //     wgpu::BufferUsage::VERTEX | wgpu::BufferUsage::WRITE_ALL,
+        // );
 
         Self {
             surface,
@@ -143,13 +263,22 @@ impl State {
             swap_chain,
             size,
 
-            which_pipeline: self::Pipeline::Simple,
-            simple_pipeline,
-            color_pipeline,
+            render_pipeline,
 
             hue: 0.0,
             sat: 0.5,
             val: 0.5,
+
+            vertex_buffer,
+
+            pentagon_indices,
+            pentagon_len,
+
+            star_indices,
+            star_len,
+
+            // color_buffer,
+            toggle: self::Toggle::A,
 
             clear_color: wgpu::Color {
                 r: 0.3,
@@ -178,9 +307,9 @@ impl State {
                     },
                 ..
             } => {
-                self.which_pipeline = match self.which_pipeline {
-                    self::Pipeline::Simple => self::Pipeline::Color,
-                    self::Pipeline::Color => self::Pipeline::Simple,
+                self.toggle = match self.toggle {
+                    self::Toggle::A => self::Toggle::B,
+                    self::Toggle::B => self::Toggle::A,
                 };
                 false
             }
@@ -236,6 +365,33 @@ impl State {
 
         let color: palette::Srgb<f64> = palette::Hsv::new(self.hue, self.sat, self.val).into();
 
+        // let data = self
+        //     .color_buffer
+        //     .map_write(0, std::mem::size_of::<Color>() as wgpu::BufferAddress);
+
+        // self.device.poll(wgpu::Maintain::Wait);
+
+        // if let Ok(mut data) = data.await {
+        //     let color: palette::Srgb<f32> = palette::Hsv::new(
+        //         ((self.hue + 180.0) % 360.0) as f32,
+        //         self.sat as f32,
+        //         self.val as f32,
+        //     )
+        //     .into();
+
+        //     let new_color = Color {
+        //         // color: [color.red, color.green, color.blue],
+        //         color: [0.0, 0.0, 0.0],
+        //     };
+
+        //     data.as_slice()
+        //         .copy_from_slice(bytemuck::cast_slice(&[new_color]));
+        // } else {
+        //     println!("Something went wrong");
+        // }
+
+        // self.color_buffer.unmap();
+
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             color_attachments: &[wgpu::RenderPassColorAttachmentDescriptor {
                 attachment: &frame.view,
@@ -252,12 +408,20 @@ impl State {
             depth_stencil_attachment: None,
         });
 
-        match self.which_pipeline {
-            self::Pipeline::Simple => render_pass.set_pipeline(&self.simple_pipeline),
-            self::Pipeline::Color => render_pass.set_pipeline(&self.color_pipeline),
-        };
+        render_pass.set_pipeline(&self.render_pipeline);
+        render_pass.set_vertex_buffer(0, &self.vertex_buffer, 0, 0);
+        // render_pass.set_vertex_buffer(1, &self.color_buffer, 0, 0);
 
-        render_pass.draw(0..3, 0..1);
+        match self.toggle {
+            self::Toggle::A => {
+                render_pass.set_index_buffer(&self.pentagon_indices, 0, 0);
+                render_pass.draw_indexed(0..self.pentagon_len, 0, 0..1);
+            }
+            self::Toggle::B => {
+                render_pass.set_index_buffer(&self.star_indices, 0, 0);
+                render_pass.draw_indexed(0..self.star_len, 0, 0..1);
+            }
+        };
 
         drop(render_pass);
 
