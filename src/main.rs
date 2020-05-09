@@ -4,6 +4,8 @@ use winit::{
     window::{Window, WindowBuilder},
 };
 
+mod texture;
+
 enum Toggle {
     A,
     B,
@@ -116,100 +118,20 @@ struct State {
     star_len: u32,
 
     color_buffer: wgpu::Buffer,
-    color_bind_group: wgpu::BindGroup,
+    color_bg: wgpu::BindGroup,
+
     toggle: self::Toggle,
+
+    texture_a: self::texture::Texture,
+    texture_a_bg: wgpu::BindGroup,
+
+    texture_b: self::texture::Texture,
+    texture_b_bg: wgpu::BindGroup,
 
     size: winit::dpi::PhysicalSize<u32>,
 }
 
 impl State {
-    fn create_pipeline(
-        vs_src: &str,
-        fs_src: &str,
-        device: &wgpu::Device,
-        sc_desc: &wgpu::SwapChainDescriptor,
-    ) -> (wgpu::Buffer, wgpu::BindGroup, wgpu::RenderPipeline) {
-        let vs_spirv = glsl_to_spirv::compile(vs_src, glsl_to_spirv::ShaderType::Vertex).unwrap();
-        let fs_spirv = glsl_to_spirv::compile(fs_src, glsl_to_spirv::ShaderType::Fragment).unwrap();
-
-        let vs_data = wgpu::read_spirv(vs_spirv).unwrap();
-        let fs_data = wgpu::read_spirv(fs_spirv).unwrap();
-
-        let vs_module = device.create_shader_module(&vs_data);
-        let fs_module = device.create_shader_module(&fs_data);
-
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("color_bind_group_layout"),
-            bindings: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStage::VERTEX,
-                ty: wgpu::BindingType::UniformBuffer { dynamic: false },
-            }],
-        });
-
-        let color = Color {
-            color: [1.0, 1.0, 1.0],
-        };
-
-        let color_buffer = device.create_buffer_with_data(
-            bytemuck::cast_slice(&[color]),
-            wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::WRITE_ALL,
-        );
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("color_bind_group_descriptor"),
-            layout: &bind_group_layout,
-            bindings: &[wgpu::Binding {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer {
-                    buffer: &color_buffer,
-                    range: 0..std::mem::size_of_val(&color) as wgpu::BufferAddress,
-                },
-            }],
-        });
-
-        let render_pipeline_layout =
-            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                bind_group_layouts: &[&bind_group_layout],
-            });
-
-        let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            layout: &render_pipeline_layout,
-            vertex_stage: wgpu::ProgrammableStageDescriptor {
-                module: &vs_module,
-                entry_point: "main",
-            },
-            fragment_stage: Some(wgpu::ProgrammableStageDescriptor {
-                module: &fs_module,
-                entry_point: "main",
-            }),
-            rasterization_state: Some(wgpu::RasterizationStateDescriptor {
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: wgpu::CullMode::Back,
-                depth_bias: 0,
-                depth_bias_slope_scale: 0.0,
-                depth_bias_clamp: 0.0,
-            }),
-            color_states: &[wgpu::ColorStateDescriptor {
-                format: sc_desc.format,
-                color_blend: wgpu::BlendDescriptor::REPLACE,
-                alpha_blend: wgpu::BlendDescriptor::REPLACE,
-                write_mask: wgpu::ColorWrite::ALL,
-            }],
-            primitive_topology: wgpu::PrimitiveTopology::TriangleList,
-            depth_stencil_state: None,
-            vertex_state: wgpu::VertexStateDescriptor {
-                index_format: wgpu::IndexFormat::Uint16,
-                vertex_buffers: &[self::Vertex::desc()],
-            },
-            sample_count: 1,
-            sample_mask: !0,
-            alpha_to_coverage_enabled: false,
-        });
-
-        (color_buffer, bind_group, render_pipeline)
-    }
-
     async fn new(window: &Window) -> Self {
         let size = window.inner_size();
 
@@ -243,25 +165,146 @@ impl State {
         };
         let swap_chain = device.create_swap_chain(&surface, &sc_desc);
 
-        let (color_buffer, color_bind_group, render_pipeline) = Self::create_pipeline(
-            include_str!("simple.vert"),
-            include_str!("simple.frag"),
-            &device,
-            &sc_desc,
-        );
+        let (vertex_buffer, pentagon_indices, pentagon_len, star_indices, star_len) = {
+            let vb = device
+                .create_buffer_with_data(bytemuck::cast_slice(VERTICES), wgpu::BufferUsage::VERTEX);
 
-        let vertex_buffer = device
-            .create_buffer_with_data(bytemuck::cast_slice(VERTICES), wgpu::BufferUsage::VERTEX);
+            let pi = device.create_buffer_with_data(
+                bytemuck::cast_slice(PENTAGON_INDICES),
+                wgpu::BufferUsage::INDEX,
+            );
+            let pl = PENTAGON_INDICES.len() as u32;
 
-        let pentagon_indices = device.create_buffer_with_data(
-            bytemuck::cast_slice(PENTAGON_INDICES),
-            wgpu::BufferUsage::INDEX,
-        );
-        let pentagon_len = PENTAGON_INDICES.len() as u32;
+            let si = device.create_buffer_with_data(
+                bytemuck::cast_slice(STAR_INDICES),
+                wgpu::BufferUsage::INDEX,
+            );
+            let sl = STAR_INDICES.len() as u32;
 
-        let star_indices = device
-            .create_buffer_with_data(bytemuck::cast_slice(STAR_INDICES), wgpu::BufferUsage::INDEX);
-        let star_len = STAR_INDICES.len() as u32;
+            (vb, pi, pl, si, sl)
+        };
+
+        let (texture_a, cmd_a) =
+            texture::Texture::from_bytes(&device, include_bytes!("texture.png")).unwrap();
+
+        let (texture_b, cmd_b) =
+            texture::Texture::from_bytes(&device, include_bytes!("texture_2.png")).unwrap();
+
+        queue.submit(&[cmd_a, cmd_b]);
+
+        let texture_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("texture_bind_group_layout"),
+            bindings: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::SampledTexture {
+                        multisampled: false,
+                        dimension: wgpu::TextureViewDimension::D2,
+                        component_type: wgpu::TextureComponentType::Uint,
+                    },
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStage::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler { comparison: false },
+                },
+            ],
+        });
+
+        let texture_a_bg = texture_a.create_bind_group(&device, &texture_bgl);
+        let texture_b_bg = texture_b.create_bind_group(&device, &texture_bgl);
+
+        let (color_buffer, color_bgl, color_bg) = {
+            let data = Color {
+                color: [1.0, 1.0, 1.0],
+            };
+
+            let buffer = device.create_buffer_with_data(
+                bytemuck::cast_slice(&[data]),
+                wgpu::BufferUsage::UNIFORM | wgpu::BufferUsage::WRITE_ALL,
+            );
+
+            let bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("color_bind_group_layout"),
+                bindings: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStage::VERTEX,
+                    ty: wgpu::BindingType::UniformBuffer { dynamic: false },
+                }],
+            });
+
+            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("color_bind_group_descriptor"),
+                layout: &bgl,
+                bindings: &[wgpu::Binding {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer {
+                        buffer: &buffer,
+                        range: 0..(std::mem::size_of::<Color>() as wgpu::BufferAddress),
+                    },
+                }],
+            });
+
+            (buffer, bgl, bg)
+        };
+
+        let render_pipeline = {
+            let vs_src = include_str!("simple.vert");
+            let fs_src = include_str!("simple.frag");
+
+            let vs_spirv =
+                glsl_to_spirv::compile(vs_src, glsl_to_spirv::ShaderType::Vertex).unwrap();
+            let fs_spirv =
+                glsl_to_spirv::compile(fs_src, glsl_to_spirv::ShaderType::Fragment).unwrap();
+
+            let vs_data = wgpu::read_spirv(vs_spirv).unwrap();
+            let fs_data = wgpu::read_spirv(fs_spirv).unwrap();
+
+            let vs_module = device.create_shader_module(&vs_data);
+            let fs_module = device.create_shader_module(&fs_data);
+
+            let render_pipeline_layout =
+                device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    bind_group_layouts: &[&texture_bgl, &color_bgl],
+                });
+
+            let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                layout: &render_pipeline_layout,
+                vertex_stage: wgpu::ProgrammableStageDescriptor {
+                    module: &vs_module,
+                    entry_point: "main",
+                },
+                fragment_stage: Some(wgpu::ProgrammableStageDescriptor {
+                    module: &fs_module,
+                    entry_point: "main",
+                }),
+                rasterization_state: Some(wgpu::RasterizationStateDescriptor {
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: wgpu::CullMode::Back,
+                    depth_bias: 0,
+                    depth_bias_slope_scale: 0.0,
+                    depth_bias_clamp: 0.0,
+                }),
+                color_states: &[wgpu::ColorStateDescriptor {
+                    format: sc_desc.format,
+                    color_blend: wgpu::BlendDescriptor::REPLACE,
+                    alpha_blend: wgpu::BlendDescriptor::REPLACE,
+                    write_mask: wgpu::ColorWrite::ALL,
+                }],
+                primitive_topology: wgpu::PrimitiveTopology::TriangleList,
+                depth_stencil_state: None,
+                vertex_state: wgpu::VertexStateDescriptor {
+                    index_format: wgpu::IndexFormat::Uint16,
+                    vertex_buffers: &[self::Vertex::desc()],
+                },
+                sample_count: 1,
+                sample_mask: !0,
+                alpha_to_coverage_enabled: false,
+            });
+
+            render_pipeline
+        };
 
         Self {
             surface,
@@ -287,8 +330,14 @@ impl State {
             star_len,
 
             color_buffer,
-            color_bind_group,
+            color_bg,
             toggle: self::Toggle::A,
+
+            texture_a,
+            texture_a_bg,
+
+            texture_b,
+            texture_b_bg,
 
             clear_color: wgpu::Color {
                 r: 0.3,
@@ -418,15 +467,17 @@ impl State {
         });
 
         render_pass.set_pipeline(&self.render_pipeline);
-        render_pass.set_bind_group(0, &self.color_bind_group, &[]);
+        render_pass.set_bind_group(1, &self.color_bg, &[]);
         render_pass.set_vertex_buffer(0, &self.vertex_buffer, 0, 0);
 
         match self.toggle {
             self::Toggle::A => {
+                render_pass.set_bind_group(0, &self.texture_a_bg, &[]);
                 render_pass.set_index_buffer(&self.pentagon_indices, 0, 0);
                 render_pass.draw_indexed(0..self.pentagon_len, 0, 0..1);
             }
             self::Toggle::B => {
+                render_pass.set_bind_group(0, &self.texture_b_bg, &[]);
                 render_pass.set_index_buffer(&self.star_indices, 0, 0);
                 render_pass.draw_indexed(0..self.star_len, 0, 0..1);
             }
@@ -442,7 +493,10 @@ fn main() {
     use futures::executor::block_on;
 
     let event_loop = EventLoop::new();
-    let window = WindowBuilder::new().build(&event_loop).unwrap();
+    let window = WindowBuilder::new()
+        .with_title("Minesweeper WGPU")
+        .build(&event_loop)
+        .unwrap();
 
     let mut state = block_on(State::new(&window));
 
